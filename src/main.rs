@@ -16,6 +16,8 @@ mod player;
 use player::*;
 mod rect;
 pub use rect::Rect;
+mod visibility_system;
+use visibility_system::VisibilitySystem;
 
 // 構造体をつくる
 // データなりメソッドなりを持たせることができるが、ここではからっぽにして、
@@ -48,8 +50,9 @@ impl GameState for State {
         // fetchでリソースを取得
         // fetchで返されるのはReferenceでなくshred型らしい
         // Referenceとして振る舞うものだがちょっと違うらしい
-        let map = self.ecs.fetch::<Vec<TileType>>();
-        draw_map(&map, ctx);
+        //let map = self.ecs.fetch::<Vec<TileType>>();
+        
+        draw_map(&self.ecs, ctx);
         
         // 各コンポーネントの保存場所への読み取りアクセス
         let positions = self.ecs.read_storage::<Position>();
@@ -68,6 +71,8 @@ impl GameState for State {
 impl State {
     // self: Stateのインスタンス
     fn run_systems(&mut self) {
+        let mut vis = VisibilitySystem{};
+        vis.run_now(&self.ecs);
         // システムによってなにか変更がなされたら、その変更はすぐ？Worldに適用してください
         self.ecs.maintain();
     }
@@ -91,16 +96,16 @@ fn main() -> rltk::BError {
     // これで、各々のコンポーネントの保存システムを内部に作ってくれる
     gs.ecs.register::<Position>();
     gs.ecs.register::<Renderable>();
-    // gs.ecs.register::<LeftMover>();
     gs.ecs.register::<Player>();
+    gs.ecs.register::<Viewshed>();
 
-    let (rooms, map) = new_map_rooms_and_corridors();
+    let map: Map = Map::new_map_rooms_and_corridors();
+    let (player_x, player_y) = map.rooms[0].center();
     
     // マップを作り、「リソース」にする
     // つまりECS全体の共有データにする
     // ecs.get, ecs.fetch, get_mut などでアクセスできる
     gs.ecs.insert(map);
-    let (player_x, player_y) = rooms[0].center();
 
     // 空っぽのエンティティつくって、コンポーネントをくっつける
     gs.ecs
@@ -112,6 +117,7 @@ fn main() -> rltk::BError {
             bg: RGB::named(rltk::BLACK),
         })
         .with(Player{})
+        .with(Viewshed{ visible_tiles : Vec::new(), range : 8, dirty: true })
         .build();
 
     // メインループ: UIの表示やゲームを走らせ続けるなどの複雑なところを受け持つ
