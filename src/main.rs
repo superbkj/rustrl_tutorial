@@ -1,6 +1,6 @@
 // rltkという名前空間から使う
 // Rltk, GameStateという型
-use rltk::{Rltk, GameState, RGB};
+use rltk::{Rltk, GameState, RGB, Point};
 use specs::prelude::*;
 
 mod components;
@@ -18,13 +18,20 @@ mod rect;
 pub use rect::Rect;
 mod visibility_system;
 use visibility_system::VisibilitySystem;
+mod monster_ai_system;
+use monster_ai_system::MonsterAI;
+
+// PartialEq allows you to compare the RunState with other RunState variables to determine if they are the same (or different)
+#[derive(PartialEq, Copy, Clone)]
+pub enum RunState {Paused, Running}
 
 // 構造体をつくる
 // データなりメソッドなりを持たせることができるが、ここではからっぽにして、
 // コードをアタッチするための場所として使う
 // World: Specsが提供するECS
 pub struct State {
-    ecs: World
+    pub ecs: World,
+    pub runstate: RunState,
 }
 
 // 上のStateでGameStateというトレイトを実装する
@@ -42,10 +49,13 @@ impl GameState for State {
         // cls: clear the screen
         ctx.cls();
 
-        // 登録したすべてのシステムが走る
-        self.run_systems();
-
-        player_input(self, ctx);
+        if self.runstate == RunState::Running {
+            // 登録したすべてのシステムが走る
+            self.run_systems();
+            self.runstate = RunState::Paused;
+        } else {
+            self.runstate = player_input(self, ctx);
+        }
 
         // fetchでリソースを取得
         // fetchで返されるのはReferenceでなくshred型らしい
@@ -57,11 +67,15 @@ impl GameState for State {
         // 各コンポーネントの保存場所への読み取りアクセス
         let positions = self.ecs.read_storage::<Position>();
         let renderables = self.ecs.read_storage::<Renderable>();
+        let map = self.ecs.fetch::<Map>();
 
         // join: PositionとRenderable両方のコンポーネントを持つエンティティ (だけ) をすべて返す
         // The join method is passing us both, guaranteed to belong to the same enitity
         for (pos, render) in (&positions, &renderables).join() {
-            ctx.set(pos.x, pos.y, render.fg, render.bg, render.glyph);
+            let idx = map.xy_idx(pos.x, pos.y);
+            if map.visible_tiles[idx] {
+                ctx.set(pos.x, pos.y, render.fg, render.bg, render.glyph);
+            }
         }
     }
 }
@@ -73,6 +87,10 @@ impl State {
     fn run_systems(&mut self) {
         let mut vis = VisibilitySystem{};
         vis.run_now(&self.ecs);
+
+        let mut mob = MonsterAI{};
+        mob.run_now(&self.ecs);
+
         // システムによってなにか変更がなされたら、その変更はすぐ？Worldに適用してください
         self.ecs.maintain();
     }
@@ -89,7 +107,8 @@ fn main() -> rltk::BError {
     // gsという変数にState構造体のコピーをセットする。参照じゃなくて
     let mut gs = State{
         // World::new(): Worldのコンストラクタ。新しくWorldを作る
-        ecs: World::new()
+        ecs: World::new(),
+        runstate: RunState::Running
     };
 
     // コンポーネントの登録。WorldというECSに登録
@@ -98,14 +117,11 @@ fn main() -> rltk::BError {
     gs.ecs.register::<Renderable>();
     gs.ecs.register::<Player>();
     gs.ecs.register::<Viewshed>();
+    gs.ecs.register::<Monster>();
+    gs.ecs.register::<Name>();
 
     let map: Map = Map::new_map_rooms_and_corridors();
     let (player_x, player_y) = map.rooms[0].center();
-    
-    // マップを作り、「リソース」にする
-    // つまりECS全体の共有データにする
-    // ecs.get, ecs.fetch, get_mut などでアクセスできる
-    gs.ecs.insert(map);
 
     // 空っぽのエンティティつくって、コンポーネントをくっつける
     gs.ecs
@@ -118,7 +134,44 @@ fn main() -> rltk::BError {
         })
         .with(Player{})
         .with(Viewshed{ visible_tiles : Vec::new(), range : 8, dirty: true })
+        .with(Name{ name: "Player".to_string() })
         .build();
+
+    let mut rng = rltk::RandomNumberGenerator::new();
+    for (i, room) in map.rooms.iter().skip(1).enumerate() {
+        let (x, y) = room.center();
+
+        let glyph : rltk::FontCharType;
+        let name : String;
+        let roll = rng.roll_dice(1, 2);
+        match roll {
+            1 => {glyph = rltk::to_cp437('g'); name = "Goblin".to_string();}
+            _ => {glyph = rltk::to_cp437('o'); name = "Orc".to_string();}
+        }
+
+        gs.ecs.create_entity()
+            .with(Position{x, y})
+            .with(Renderable{
+                glyph: glyph,
+                fg: RGB::named(rltk::RED),
+                bg: RGB::named(rltk::BLACK)
+            })
+            .with(Viewshed{
+                visible_tiles: Vec::new(),
+                range: 8,
+                dirty: true
+            })
+            .with(Monster{})
+            .with(Name{ name: format!("{} #{}", &name, i)})
+            .build();
+    }
+
+    // マップを作り、「リソース」にする
+    // つまりECS全体の共有データにする
+    // ecs.get, ecs.fetch, get_mut などでアクセスできる
+    gs.ecs.insert(map);
+
+    gs.ecs.insert(Point::new(player_x, player_y));
 
     // メインループ: UIの表示やゲームを走らせ続けるなどの複雑なところを受け持つ
     // こいつがtick関数を毎度呼ぶことになる
