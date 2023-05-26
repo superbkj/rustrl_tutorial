@@ -20,10 +20,16 @@ mod visibility_system;
 use visibility_system::VisibilitySystem;
 mod monster_ai_system;
 use monster_ai_system::MonsterAI;
+mod map_indexing_system;
+use map_indexing_system::MapIndexingSystem;
+mod melee_combat_system;
+use melee_combat_system::MeleeCombatSystem;
+mod damage_system;
+use damage_system::DamageSystem;
 
 // PartialEq allows you to compare the RunState with other RunState variables to determine if they are the same (or different)
 #[derive(PartialEq, Copy, Clone)]
-pub enum RunState {Paused, Running}
+pub enum RunState { PreRun, AwaitingInput, PlayerTurn, MonsterTurn }
 
 // 構造体をつくる
 // データなりメソッドなりを持たせることができるが、ここではからっぽにして、
@@ -31,7 +37,7 @@ pub enum RunState {Paused, Running}
 // World: Specsが提供するECS
 pub struct State {
     pub ecs: World,
-    pub runstate: RunState,
+    // pub runstate: RunState,
 }
 
 // 上のStateでGameStateというトレイトを実装する
@@ -49,18 +55,37 @@ impl GameState for State {
         // cls: clear the screen
         ctx.cls();
 
-        if self.runstate == RunState::Running {
-            // 登録したすべてのシステムが走る
-            self.run_systems();
-            self.runstate = RunState::Paused;
-        } else {
-            self.runstate = player_input(self, ctx);
+        let mut newrunstate;
+        {
+            let runstate = self.ecs.fetch::<RunState>();
+            newrunstate = *runstate;
         }
 
-        // fetchでリソースを取得
-        // fetchで返されるのはReferenceでなくshred型らしい
-        // Referenceとして振る舞うものだがちょっと違うらしい
-        //let map = self.ecs.fetch::<Vec<TileType>>();
+        match newrunstate {
+            RunState::PreRun => {
+                self.run_systems();
+                newrunstate = RunState::AwaitingInput;
+            }
+            RunState::AwaitingInput => {
+                newrunstate = player_input(self, ctx);
+            }
+            RunState::PlayerTurn => {
+                self.run_systems();
+                newrunstate = RunState::MonsterTurn;
+            }
+            RunState::MonsterTurn => {
+                self.run_systems();
+                newrunstate = RunState::AwaitingInput;
+            }
+        }
+
+        // newrunstateをリソースのRunStateに反映
+        {
+            let mut runwriter = self.ecs.write_resource::<RunState>();
+            *runwriter = newrunstate;
+        }
+
+        damage_system::delete_the_dead(&mut self.ecs);
         
         draw_map(&self.ecs, ctx);
         
@@ -91,6 +116,15 @@ impl State {
         let mut mob = MonsterAI{};
         mob.run_now(&self.ecs);
 
+        let mut mapindex = MapIndexingSystem{};
+        mapindex.run_now(&self.ecs);
+
+        let mut melee = MeleeCombatSystem{};
+        melee.run_now(&self.ecs);
+
+        let mut damage = DamageSystem{};
+        damage.run_now(&self.ecs);
+
         // システムによってなにか変更がなされたら、その変更はすぐ？Worldに適用してください
         self.ecs.maintain();
     }
@@ -108,7 +142,7 @@ fn main() -> rltk::BError {
     let mut gs = State{
         // World::new(): Worldのコンストラクタ。新しくWorldを作る
         ecs: World::new(),
-        runstate: RunState::Running
+        // runstate: RunState::Running
     };
 
     // コンポーネントの登録。WorldというECSに登録
@@ -119,12 +153,17 @@ fn main() -> rltk::BError {
     gs.ecs.register::<Viewshed>();
     gs.ecs.register::<Monster>();
     gs.ecs.register::<Name>();
+    gs.ecs.register::<BlocksTile>();
+    gs.ecs.register::<CombatStats>();
+    gs.ecs.register::<WantsToMelee>();
+    gs.ecs.register::<SufferDamage>();
 
     let map: Map = Map::new_map_rooms_and_corridors();
     let (player_x, player_y) = map.rooms[0].center();
 
     // 空っぽのエンティティつくって、コンポーネントをくっつける
-    gs.ecs
+    // Player作成
+    let player_entity = gs.ecs
         .create_entity()
         .with(Position {x: player_x, y: player_y})
         .with(Renderable {
@@ -135,8 +174,10 @@ fn main() -> rltk::BError {
         .with(Player{})
         .with(Viewshed{ visible_tiles : Vec::new(), range : 8, dirty: true })
         .with(Name{ name: "Player".to_string() })
+        .with(CombatStats{ max_hp: 30, hp: 30, defense: 2, power: 5})
         .build();
 
+    // Monster作成
     let mut rng = rltk::RandomNumberGenerator::new();
     for (i, room) in map.rooms.iter().skip(1).enumerate() {
         let (x, y) = room.center();
@@ -163,6 +204,8 @@ fn main() -> rltk::BError {
             })
             .with(Monster{})
             .with(Name{ name: format!("{} #{}", &name, i)})
+            .with(BlocksTile{})
+            .with(CombatStats{ max_hp: 16, hp: 16, defense: 1, power: 4})
             .build();
     }
 
@@ -170,8 +213,10 @@ fn main() -> rltk::BError {
     // つまりECS全体の共有データにする
     // ecs.get, ecs.fetch, get_mut などでアクセスできる
     gs.ecs.insert(map);
-
+    
     gs.ecs.insert(Point::new(player_x, player_y));
+    gs.ecs.insert(player_entity);
+    gs.ecs.insert(RunState::PreRun);
 
     // メインループ: UIの表示やゲームを走らせ続けるなどの複雑なところを受け持つ
     // こいつがtick関数を毎度呼ぶことになる

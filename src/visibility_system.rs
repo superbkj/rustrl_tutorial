@@ -29,12 +29,12 @@ impl<'a> System<'a> for VisibilitySystem {
 
         // If this is the player, reveal what they can see
         // playerストレージにそのエンティティが存在するか？
-        let p : Option<&Player> = player.get(ent);
+        let _p : Option<&Player> = player.get(ent);
         // if there is a Player component
-        if let Some(p) = p {
+        if let Some(_p) = _p {
           // いったんvisible falseにクリア
           for t in map.visible_tiles.iter_mut() {*t = false};
-          
+
           for vis in viewshed.visible_tiles.iter() {
             let idx = map.xy_idx(vis.x, vis.y);
             map.revealed_tiles[idx] = true;
